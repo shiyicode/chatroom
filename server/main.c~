@@ -1,0 +1,399 @@
+/*************************************************************************
+	> File Name: 1.c
+	> Author: 师毅
+	> Mail:  shiyi19960604@gmail.com
+	> Created Time: 2015年08月07日 星期五 08时41分20秒
+ ************************************************************************/
+
+#include<stdio.h>
+#include<string.h>
+#include<stdlib.h>
+#include<errno.h>
+#include<sys/socket.h>
+#include<sys/epoll.h>
+#include<fcntl.h>
+#include<unistd.h>
+#include<arpa/inet.h>
+#include<pthread.h>
+#include"user.h"
+
+
+
+#define LISTENMAX 200
+#define PORT 8001
+#define IP_ADDR "127.0.0.1"
+#define EPOLL_MAX 2000
+
+int f[2001] = {0};
+
+struct Pthread
+{
+	int fd;
+	new_t new;
+};
+
+int send_to_one(int conn_fd, new_t new)
+{
+	int temp_id;
+	user_t user;
+	temp_id = find_user_id(new.to_name, &user);
+	if(temp_id == 0)//好友名不存在，通知用户
+	{
+		new.flag = 0;
+		if(send(conn_fd, &new, sizeof(new_t), 0) < 0)
+		{
+			perror("send");
+		}
+	}
+	else
+	{
+		new.flag = 1;
+		while(1)
+		{
+			if(f[temp_id])
+			{
+				if(send(f[temp_id], &new, sizeof(new_t), 0) < 0)
+				{
+					perror("send");
+				}
+				break;
+			}
+			sleep(1);
+		}
+	}
+	return 0;
+}
+
+void fun(struct Pthread *data)
+{
+	send_to_one(data->fd, data->new);
+}
+
+int send_to_more(int conn_fd, new_t new)
+{
+	group_t grp;
+	pthread_t thread;
+	int i;
+	struct Pthread *data;
+
+	new.type = 4;
+	new.flag = 9;
+	if(find_group(new.grp.grp_name,&grp) == 0)
+	{
+		new.flag = 0;
+		send_to_one(conn_fd, new);
+		return 0;
+	}
+
+	data = (struct Pthread*)malloc(sizeof(struct Pthread));
+	data->fd = conn_fd;
+	memcpy(&data->new, &new, sizeof(new_t));
+				
+	strcpy(data->new.to_name, grp.make);
+	pthread_create(&thread, NULL, (void*)fun, data);
+	
+	for(i=0;i<grp.num;i++)
+	{
+		data = (struct Pthread*)malloc(sizeof(struct Pthread));
+		data->fd = conn_fd;
+		memcpy(&data->new, &new, sizeof(new_t));
+	
+		strcpy(data->new.to_name, grp.name[i]);
+		pthread_create(&thread, NULL, (void*)fun, data);		
+	}
+	return 1;
+}
+
+void *def(struct Pthread *data)
+{
+	int conn_fd;
+	new_t send_new, temp_new;
+	user_t user;
+	int ret;
+	//int temp_id;
+	char temp[20];
+	
+	conn_fd = data->fd;
+	switch (data->new.type)
+	{	
+		case 1://注册
+		
+			if(find_user_id(data->new.user.name, &user) != 0)
+			{
+				strcpy(send_new.buf, "！！！用户名已存在");
+			}
+			else
+			{
+				if(add_user(&data->new.user) == 1)
+				{
+					strcpy(send_new.buf, "注册成功");
+				}
+			}
+			send(conn_fd, &send_new, sizeof(new_t), 0);
+			break;
+		
+		case 2://登陆
+		
+			if(find_user_id(data->new.user.name, &user) == 0)
+			{
+				strcpy(send_new.buf, "！！！用户名不存在");
+			}
+			else
+			{
+				if(strcmp(data->new.user.pass, user.pass) == 0)
+				{
+					if(f[user.id]==0)
+					{
+						strcpy(send_new.buf, "登陆成功");
+						printf("%s 上线了！\n",user.name);
+						f[user.id] = conn_fd;
+						printf("**%d\n",user.id);
+					}
+					else
+					{
+						strcpy(send_new.buf, "！！！账号已在线");
+					}
+				}
+				else
+				{
+					strcpy(send_new.buf, "！！！密码错误");
+				}
+			}
+			send(conn_fd, &send_new, sizeof(new_t), 0);
+			break;
+		
+		case 3://私聊
+			send_to_one(conn_fd,data->new);
+			break;
+		case 4://群发
+			data->new.flag = 9;
+
+			send_to_more(conn_fd, data->new);
+			break;
+			
+		case 5://查看好友
+			send_new.type = 5;
+			look_firend(data->new.user.name, send_new.buf);
+				
+			if(send_new.buf[0]!='#' && send_new.buf[0]!='*')
+			{
+				send_new.buf[0]='\0';
+			}
+			send(conn_fd, &send_new, sizeof(new_t), 0);
+			break;
+			
+		case 6://好友管理
+			send_new.type = 6;
+			strcpy(send_new.to_name,data->new.user.name);			
+			if(data->new.from_name[0] == '\0')//添加好友
+			{
+
+				strcpy(send_new.buf,data->new.to_name);
+				if(find_friend(data->new.user.name,data->new.from_name) == 0)
+				{
+					if(add_friend(data->new.user.name,data->new.to_name) == 1)
+					{
+						strcat(send_new.buf," 添加成功");						
+						sprintf(temp, "%s添加了您为好友", data->new.user.name);
+						
+						strcpy(data->new.buf, temp);
+						send_to_one(conn_fd, data->new);
+					}
+					else
+					{
+						strcat(send_new.buf," 不存在");
+					}
+				}
+				else
+				{
+					strcat(send_new.buf," 已经是你的好友");
+				}
+			}
+			else//删除好友
+			{
+				strcpy(send_new.buf,data->new.from_name);
+				if(find_friend(data->new.user.name,data->new.from_name) == 1)
+				{
+					del_friend(data->new.user.name,data->new.from_name);
+					strcpy(send_new.buf,"删除成功");
+					sprintf(temp, "%s将您从好友中删除", data->new.user.name);
+					strcpy(data->new.buf, temp);
+					strcpy(data->new.to_name, data->new.from_name);
+					send_to_one(conn_fd, data->new);
+				}
+			}
+			printf("%s\n",send_new.buf);
+			send(conn_fd, &send_new, sizeof(new_t), 0);
+			break;
+		
+		case 7:
+			send_new.type = 7;
+			strcpy(temp_new.grp.grp_name, data->new.grp.grp_name);
+			switch (data->new.flag)
+			{
+				case 1:
+					look_group(&send_new);
+					send(conn_fd, &send_new, sizeof(new_t), 0);
+					break;
+				case 2:
+					if(add_group(&data->new.grp) == 0)
+					{
+						sprintf(send_new.buf, "创建失败：讨论组 %s 已存在",data->new.grp.grp_name);
+						send(conn_fd, &send_new, sizeof(new_t), 0);
+					}
+					else
+					{
+						temp_new.type = 7;
+						sprintf(send_new.buf, "创建讨论组 %s 成功",data->new.grp.grp_name);
+						send(conn_fd, &send_new, sizeof(new_t), 0);
+						
+						strcpy(temp_new.from_name,data->new.grp.make);
+						sprintf(temp_new.buf, "%s 创建了讨论组 %s,您已是其中一员",data->new.grp.make, data->new.grp.grp_name);
+						send_to_more(conn_fd,temp_new);
+					}
+					break;
+				case 3:
+					temp_new.type = 7;
+
+					ret = del_group(data->new.grp.grp_name, data->new.user.name);
+					switch (ret)
+					{
+						case 0:
+							sprintf(send_new.buf, "退出失败：讨论组 %s 不存在",data->new.grp.grp_name);
+							send(conn_fd, &send_new, sizeof(new_t), 0);
+							break;
+						case 1:
+
+							sprintf(send_new.buf, "解散讨论组 %s 成功",data->new.grp.grp_name);
+							send(conn_fd, &send_new, sizeof(new_t), 0);							
+
+							strcpy(temp_new.from_name,data->new.grp.make);
+							sprintf(temp_new.buf, "%s 解散了讨论组 %s",data->new.grp.make, data->new.grp.grp_name);
+							send_to_more(conn_fd,temp_new);
+							
+							break;
+						case 2:
+							sprintf(send_new.buf, "退出讨论组 %s 失败，您并未加入此组",data->new.grp.grp_name);
+							send(conn_fd, &send_new, sizeof(new_t), 0);
+
+							break;
+						case 3:
+							sprintf(send_new.buf, "退出讨论组 %s 成功",data->new.grp.grp_name);
+							send(conn_fd, &send_new, sizeof(new_t), 0);
+	
+							strcpy(temp_new.from_name,data->new.grp.make);
+							sprintf(temp_new.buf, "%s 退出了讨论组 %s",data->new.user.name,data->new.grp.grp_name);
+							send_to_more(conn_fd,temp_new);
+							break;
+						default :
+							break;
+					}
+					break;
+			}
+			break;
+		default:
+			break;
+			
+	}
+
+	free(data);
+	pthread_exit(0);
+	return NULL;
+}
+
+int main()
+{
+	struct epoll_event ev, events[LISTENMAX];
+	int epfd, listen_fd, nfds, sock_fd;
+	struct sockaddr_in addr;
+	socklen_t addr_len;
+	int n, i, j;
+	pthread_t thread;
+	new_t new;
+	struct Pthread *data;
+	user_t user;
+	
+	epfd = epoll_create(EPOLL_MAX+1);
+	listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+	i=1;
+	setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &i, sizeof(int));
+	ev.data.fd = listen_fd;
+	ev.events = EPOLLIN;
+	epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);
+		
+	memset(&addr, 0, sizeof(struct sockaddr_in));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_ANY);	
+	addr.sin_port = htons(PORT);
+
+	if(bind(listen_fd, (struct sockaddr*)&addr, sizeof(struct sockaddr_in)) < 0)
+	{
+		perror("bind");
+		exit(1);
+	}
+	
+	listen(listen_fd, LISTENMAX);
+	
+	addr_len = sizeof(struct sockaddr_in);
+	
+	while(1)
+	{
+		nfds = epoll_wait(epfd, events, EPOLL_MAX, 1000);
+		
+		for(i=0; i<nfds; i++)
+		{
+			memset(&new, 0, sizeof(new_t));
+			
+			if(events[i].data.fd == listen_fd)
+			{
+				sock_fd = accept(listen_fd, (struct sockaddr*)&addr,&addr_len);
+				printf("accept a new client: %s\n",inet_ntoa(addr.sin_addr));
+				ev.data.fd = sock_fd;
+				ev.events = EPOLLIN;
+				epoll_ctl(epfd, EPOLL_CTL_ADD, sock_fd, &ev);
+			}
+			
+			else if(events[i].events & EPOLLIN)
+			{
+				n = recv(events[i].data.fd, &new, sizeof(struct News), 0);
+				
+				if(n < 0)
+				{
+					close(events[i].data.fd);
+					perror("recv");
+					continue;
+				}
+				else if(n == 0)
+				{
+					ev.data.fd = events[i].data.fd;
+					epoll_ctl(epfd, EPOLL_CTL_DEL, events[i].data.fd, &ev);			
+					for(j=1;j<=2000;j++)
+					{
+						if(f[j] == events[i].data.fd)
+						{
+							break;
+						}
+					}
+					if(j <= 2000)
+					{
+						f[j] = 0;
+						find_user_name(j, &user);
+						printf("%s 下线了！\n",user.name);
+					}
+
+					close(events[i].data.fd);
+					
+					continue;
+				}
+				
+				data = (struct Pthread*)malloc(sizeof(struct Pthread));
+				data->fd = events[i].data.fd;
+				memcpy(&data->new, &new, sizeof(new_t));
+				pthread_create(&thread, NULL, (void*)def, data);
+			}
+		
+		}
+	}
+	
+}
+
